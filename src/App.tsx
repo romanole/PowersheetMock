@@ -105,14 +105,43 @@ function App() {
     const handleColumnTypeChange = async (colIndex: number, newType: string) => {
         if (!schema) return;
 
+        let decimalSeparator: '.' | ',' | null = null;
+
+        // Ask for decimal separator if converting to numeric type
+        const numericTypes = ['DOUBLE', 'FLOAT', 'DECIMAL', 'NUMERIC', 'REAL'];
+        if (numericTypes.includes(newType.toUpperCase())) {
+            const response = prompt(
+                'Which decimal separator does your data use?\n\n' +
+                'Enter "." for US format (1234.56)\n' +
+                'Enter "," for European format (1234,56)\n\n' +
+                'Or cancel to skip conversion.',
+                '.'
+            );
+
+            if (!response) return; // User cancelled
+
+            decimalSeparator = response === ',' ? ',' : '.';
+        }
+
         try {
             setIsLoading(true);
 
-            const newColumnDefs = schema.columns.map((col, idx) =>
-                idx === colIndex
-                    ? `TRY_CAST("${col.name}" AS ${newType}) AS "${col.name}"`
-                    : `"${col.name}"`
-            ).join(', ');
+            const newColumnDefs = schema.columns.map((col, idx) => {
+                if (idx === colIndex) {
+                    // For numeric types with European decimal separator, normalize first
+                    if (decimalSeparator === ',') {
+                        return `TRY_CAST(
+                            REPLACE(
+                                REPLACE("${col.name}", '.', ''),  -- Remove thousand separator
+                                ',', '.'                           -- Change decimal separator to dot
+                            ) AS ${newType}
+                        ) AS "${col.name}"`;
+                    } else {
+                        return `TRY_CAST("${col.name}" AS ${newType}) AS "${col.name}"`;
+                    }
+                }
+                return `"${col.name}"`;
+            }).join(', ');
 
             await query('CREATE TABLE temp_new AS SELECT ' + newColumnDefs + ' FROM main_dataset');
             await query('DROP TABLE main_dataset');
@@ -133,7 +162,7 @@ function App() {
         }
     };
 
-    const handleInsertRow = async () => {
+    const handleInsertRow = async (rowIndex: number, position: 'above' | 'below') => {
         if (!schema) return;
 
         try {
@@ -150,7 +179,7 @@ function App() {
             const result = await query('SELECT * FROM main_dataset LIMIT 50');
             setGridData(result.rows);
 
-            console.log('[App] ✅ Row inserted');
+            console.log('[App] ✅ Row inserted', position, 'row', rowIndex + 1);
         } catch (err) {
             console.error('[App] ❌ Insert row failed:', err);
             alert('Failed to insert row');

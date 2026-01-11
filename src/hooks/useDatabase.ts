@@ -68,13 +68,13 @@ export function useDatabase() {
             const fullMessage: WorkerMessage = { id, ...message };
             workerRef.current.postMessage(fullMessage);
 
-            // Timeout after 60 seconds (increased for large CSV files)
+            // Timeout after 120 seconds (increased for large files and slow initialization)
             setTimeout(() => {
                 if (pendingRequests.current.has(id)) {
                     pendingRequests.current.delete(id);
-                    reject(new Error('Request timeout after 60 seconds - file might be too large'));
+                    reject(new Error('Request timeout after 120 seconds - operation took too long'));
                 }
-            }, 60000);
+            }, 120000);
         });
     }, []);
 
