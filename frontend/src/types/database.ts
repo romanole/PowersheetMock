@@ -6,7 +6,7 @@ export interface QueryResult {
 }
 
 export interface TableSchema {
-    name: string;
+    tableName: string;
     columns: ColumnInfo[];
     rowCount: number;
 }

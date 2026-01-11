@@ -1,58 +1,73 @@
 # PowerSheet
 
-High-performance web-based spreadsheet application capable of handling 1M+ rows using React, DuckDB Wasm, and OPFS persistence.
+High-performance web-based spreadsheet application with Python backend and React frontend.
+
+## Project Structure
+
+```
+PowersheetMock/
+├── frontend/           # React + TypeScript + Vite
+│   ├── src/
+│   ├── public/
+│   ├── package.json
+│   └── vite.config.ts
+│
+├── backend/            # Python + FastAPI + DuckDB
+│   ├── main.py
+│   ├── api/
+│   ├── db/
+│   └── requirements.txt
+│
+├── data/              # Database storage (gitignored)
+│   └── powersheet.db
+│
+└── README.md
+```
+
+## Quick Start
+
+### Backend Setup
+
+```bash
+cd backend
+python -m venv venv
+
+# Windows
+venv\Scripts\activate
+
+# Linux/Mac
+source venv/bin/activate
+
+pip install -r requirements.txt
+python main.py
+```
+
+Backend will run on http://localhost:8000
+
+### Frontend Setup
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Frontend will run on http://localhost:5173
 
 ## Features
 
-- 🚀 **Performance**: Handle 1M+ rows at 60fps with virtual scrolling
-- 📊 **Analytics**: Built-in pivot tables and charts
-- 🔢 **Formulas**: Excel-compatible formulas (380+ functions via HyperFormula)
-- 💾 **Persistence**: Auto-save with OPFS (Origin Private File System)
-- 🔍 **Data Wrangling**: Sort, filter, find/replace, remove duplicates
-- 📈 **Visualizations**: Interactive charts with Recharts
+- ✅ Large file support (2GB+)
+- ✅ DuckDB native performance  
+- ✅ Persistent data storage
+- ✅ Excel-style editing
+- ✅ Column type conversion
+- ✅ Row/column operations
+- ✅ Multi-sheet support (coming soon)
 
-## Tech Stack
+## API Documentation
 
-- **Frontend**: React 18 + TypeScript + Vite
-- **Database**: DuckDB Wasm (OLAP engine in browser)
-- **Formulas**: HyperFormula (Excel-compatible)
-- **State**: Zustand
-- **Styling**: Tailwind CSS
-- **Icons**: Lucide React
-
-## Getting Started
-
-```bash
-# Install dependencies
-npm install
-
-# Start development server
-npm run dev
-
-# Build for production
-npm run build
-```
+Interactive API docs: http://localhost:8000/docs
 
 ## Development
 
-```bash
-# Run tests
-npm test
-
-# Run integration tests
-npm run test:integration
-
-# Generate test data
-npm run generate-test-data -- --rows 1000000
-```
-
-## Documentation
-
-See the `/docs` folder for detailed specifications:
-- [Implementation Plan](docs/implementation_plan.md)
-- [Architecture Overview](docs/architecture.md)
-- [Formula System](docs/formula_system_spec.md)
-
-## License
-
-MIT
+Both frontend and backend need to run simultaneously in separate terminals.

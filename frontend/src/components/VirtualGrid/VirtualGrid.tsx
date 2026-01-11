@@ -152,12 +152,14 @@ export function VirtualGrid({
 
     const handleRowContextMenu = (e: React.MouseEvent, rowIdx: number) => {
         e.preventDefault();
+        console.log('🔍 [CONTEXT MENU] Row context menu triggered:', rowIdx);
         setContextMenu({
             x: e.clientX,
             y: e.clientY,
             type: 'row',
             index: rowIdx,
         });
+        console.log('🔍 [CONTEXT MENU] Set context menu state:', { x: e.clientX, y: e.clientY, type: 'row', index: rowIdx });
     };
 
     const handleColumnContextMenu = (e: React.MouseEvent, colIdx: number) => {
@@ -289,8 +291,8 @@ export function VirtualGrid({
             {/* Context Menu */}
             {contextMenu && (
                 <div
-                    className="fixed bg-white border border-slate-300 shadow-lg rounded-md py-1 z-50 min-w-[180px]"
-                    style={{ left: contextMenu.x, top: contextMenu.y }}
+                    className="fixed bg-white border-2 border-slate-400 shadow-2xl rounded-md py-1 min-w-[180px]"
+                    style={{ left: contextMenu.x, top: contextMenu.y, zIndex: 99999 }}
                     onClick={(e) => e.stopPropagation()}
                 >
                     {contextMenu.type === 'row' ? (

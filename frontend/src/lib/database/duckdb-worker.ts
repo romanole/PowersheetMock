@@ -5,7 +5,7 @@ let db: duckdb.AsyncDuckDB | null = null;
 let conn: duckdb.AsyncDuckDBConnection | null = null;
 let registeredFiles: Map<string, boolean> = new Map();
 
-// Initialize DuckDB Wasm with OPFS persistence
+// Initialize DuckDB Wasm (in-memory for stability)
 async function initialize() {
     try {
         const JSDELIVR_BUNDLES = duckdb.getJsDelivrBundles();
@@ -22,12 +22,12 @@ async function initialize() {
         const worker = new Worker(worker_url);
         const logger = new duckdb.ConsoleLogger();
 
-        // Initialize with in-memory database (session-only)
+        // Initialize DuckDB (in-memory)
         db = new duckdb.AsyncDuckDB(logger, worker);
         await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
 
         conn = await db.connect();
-        console.log('[DuckDB] Connected to in-memory database (session-only)');
+        console.log('[DuckDB] ✅ Connected to in-memory database');
 
         // Enable extensions
         await conn.query(`INSTALL 'parquet';`);

@@ -1,6 +1,7 @@
 import { Database, Upload } from 'lucide-react';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useDatabase } from './hooks/useDatabase';
+import api from './api/client';
 import { DropZone } from './components/FileUpload/DropZone';
 import { ImportWizard } from './components/FileUpload/ImportWizard';
 import { VirtualGrid } from './components/VirtualGrid/VirtualGrid';
@@ -20,12 +21,46 @@ function App() {
     const [loadError, setLoadError] = useState<string | null>(null);
     const [wizardFile, setWizardFile] = useState<File | null>(null);
 
+    // Auto-restore data from backend database on mount
+    useEffect(() => {
+        if (!isInitialized) return;
+
+        console.log('🔍 [Backend] Checking for existing data...');
+
+        getSchema()
+            .then(async (tableSchema) => {
+                if (tableSchema && tableSchema.rowCount > 0) {
+                    setSchema(tableSchema);
+
+                    const result = await query('SELECT * FROM main_dataset LIMIT 50');
+                    setGridData(result.rows);
+
+                    console.log('✅ [Backend] Restored from database:', {
+                        rows: tableSchema.rowCount.toLocaleString(),
+                        columns: tableSchema.columns.length
+                    });
+                } else {
+                    console.log('ℹ️ [Backend] No existing data found');
+                }
+            })
+            .catch((err) => {
+                console.log('ℹ️ [Backend] No existing data to restore:', err.message);
+            });
+    }, [isInitialized, getSchema, query]);
+
     const handleFileSelect = async (file: File) => {
         setWizardFile(file);
     };
 
-    const handleWizardConfirm = async (columnConfigs: ColumnConfig[]) => {
+    const handleWizardConfirm = async (_columnConfigs: ColumnConfig[]) => {
         if (!wizardFile) return;
+
+        const startTime = performance.now();
+
+        console.log('🚀 [IMPORT START]', {
+            file: wizardFile.name,
+            size: `${(wizardFile.size / 1024 / 1024).toFixed(2)} MB`
+        });
 
         setIsLoading(true);
         setLoadError(null);
@@ -33,44 +68,34 @@ function App() {
         setGridData([]);
 
         try {
-            const includedColumns = columnConfigs.filter(c => c.include);
+            // Upload file to backend - backend handles all CSV parsing and DuckDB import
+            console.log('📤 Uploading file to backend...');
+            const uploadResult = await registerFile(wizardFile);
+            console.log(`✓ File uploaded: ${uploadResult.rows.toLocaleString()} rows, ${uploadResult.columns} columns`);
 
-            if (includedColumns.length === 0) {
-                throw new Error('At least one column must be selected');
-            }
-
-            console.log('[App] Starting import...');
-
-            await registerFile(wizardFile);
-
-            try {
-                await query('DROP TABLE IF EXISTS main_dataset');
-                await query('DROP TABLE IF EXISTS temp_import');
-            } catch (e) {
-                // Ignore
-            }
-
-            await query(`CREATE TABLE temp_import AS SELECT * FROM read_csv_auto('${wizardFile.name}')`);
-
-            const columnDefs = includedColumns.map(c =>
-                `TRY_CAST("${c.name}" AS ${c.type}) AS "${c.name}"`
-            ).join(', ');
-
-            await query(`CREATE TABLE main_dataset AS SELECT ${columnDefs} FROM temp_import`);
-            await query('DROP TABLE temp_import');
-
+            // Get schema from backend
             const tableSchema = await getSchema();
             setSchema(tableSchema);
+            console.log(`✓ Schema loaded`);
 
+            // Fetch initial data
             const result = await query('SELECT * FROM main_dataset LIMIT 50');
             setGridData(result.rows);
+            console.log(`✓ Initial data loaded`);
 
             setWizardFile(null);
-            console.log('[App] ✅ Import completed:', tableSchema.rowCount, 'rows');
+
+            const totalTime = performance.now() - startTime;
+
+            console.log('✅ [IMPORT COMPLETE]', {
+                rows: tableSchema.rowCount.toLocaleString(),
+                columns: tableSchema.columns.length,
+                totalTime: `${(totalTime / 1000).toFixed(2)}s`
+            });
         } catch (err) {
             const message = err instanceof Error ? err.message : 'Failed to load file';
             setLoadError(message);
-            console.error('[App] ❌ Import error:', message);
+            console.error('❌ [IMPORT ERROR]', message, err);
             alert(`Import failed: ${message}`);
         } finally {
             setIsLoading(false);
@@ -165,24 +190,34 @@ function App() {
     const handleInsertRow = async (rowIndex: number, position: 'above' | 'below') => {
         if (!schema) return;
 
+        const startTime = performance.now();
+        console.log('🔹 [INSERT ROW]', { rowIndex, position });
+
         try {
             setIsLoading(true);
 
-            const columns = schema.columns.map(col => `"${col.name}"`).join(', ');
-            const values = schema.columns.map(() => 'NULL').join(', ');
+            // Calculate insert position: above means at rowIndex, below means at rowIndex + 1
+            const insertPosition = position === 'above' ? rowIndex : rowIndex + 1;
 
-            await query(`INSERT INTO main_dataset (${columns}) VALUES (${values})`);
+            // Use backend API with position
+            await api.insertRow('main_dataset', insertPosition);
+            console.log(`✓ INSERT executed at position ${insertPosition} (${(performance.now() - startTime).toFixed(0)}ms)`);
 
+            // Refresh data - need to query with ORDER BY _row_order
             const newSchema = await getSchema();
             setSchema(newSchema);
 
-            const result = await query('SELECT * FROM main_dataset LIMIT 50');
+            const result = await query('SELECT * FROM main_dataset ORDER BY _row_order LIMIT 50');
             setGridData(result.rows);
 
-            console.log('[App] ✅ Row inserted', position, 'row', rowIndex + 1);
+            console.log('✅ [INSERT ROW COMPLETE]', {
+                totalTime: `${(performance.now() - startTime).toFixed(0)}ms`,
+                newRowCount: newSchema.rowCount,
+                position: insertPosition
+            });
         } catch (err) {
-            console.error('[App] ❌ Insert row failed:', err);
-            alert('Failed to insert row');
+            console.error('❌ [INSERT ROW ERROR]', err);
+            alert(`Failed to insert row: ${err instanceof Error ? err.message : 'Unknown error'}`);
         } finally {
             setIsLoading(false);
         }
@@ -273,6 +308,27 @@ function App() {
         }
     };
 
+    const handleClearDatabase = async () => {
+        const confirmed = confirm(
+            'Delete ALL data from database?\n\nThis will:\n- Remove all imported data\n- Clear OPFS storage\n- Cannot be undone\n\nContinue?'
+        );
+        if (!confirmed) return;
+
+        try {
+            setIsLoading(true);
+            await query('DROP TABLE IF EXISTS main_dataset');
+            setSchema(null);
+            setGridData([]);
+            console.log('✅ [OPFS] Database cleared');
+            alert('Database cleared successfully!');
+        } catch (err) {
+            console.error('❌ [OPFS] Failed to clear database:', err);
+            alert('Failed to clear database');
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
     if (error) {
         return (
             <div className="flex h-screen items-center justify-center bg-red-50">
@@ -336,6 +392,16 @@ function App() {
                 >
                     <Upload size={18} />
                 </button>
+
+                {schema && (
+                    <button
+                        onClick={handleClearDatabase}
+                        className="ml-2 px-3 py-1.5 text-xs text-red-600 hover:bg-red-50 rounded-md transition-colors border border-red-200"
+                        title="Clear all data from OPFS"
+                    >
+                        Clear Database
+                    </button>
+                )}
             </div>
 
             {/* Main Content */}

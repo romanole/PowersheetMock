@@ -13,14 +13,15 @@
     "generate-test-data": "node scripts/generateTestData.js"
   },
   "dependencies": {
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "zustand": "^4.5.0",
     "@duckdb/duckdb-wasm": "^1.28.0",
+    "@tanstack/react-virtual": "^3.0.4",
+    "axios": "^1.13.2",
     "hyperformula": "^2.6.3",
     "lucide-react": "^0.344.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
     "recharts": "^2.12.0",
-    "@tanstack/react-virtual": "^3.0.4"
+    "zustand": "^4.5.0"
   },
   "devDependencies": {
     "@types/react": "^18.2.56",
