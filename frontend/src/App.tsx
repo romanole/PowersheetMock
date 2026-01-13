@@ -5,11 +5,18 @@ import api from './api/client';
 import { DropZone } from './components/FileUpload/DropZone';
 import { ImportWizard } from './components/FileUpload/ImportWizard';
 import { VirtualGrid } from './components/VirtualGrid/VirtualGrid';
+import { ExcelGrid } from './components/VirtualGrid/ExcelGrid';
+import { FormulaBar } from './components/FormulaBar/FormulaBar';
+import { AdvancedFormulaBar } from './components/FormulaBar/AdvancedFormulaBar';
+import { FormulaMetadataPanel } from './components/FormulaBar/FormulaMetadataPanel';
 import { SheetTabs } from './components/SheetTabs/SheetTabs';
 import type { TableSchema } from './types/database';
 import type { Sheet } from './api/client';
 import { FormulaEngine } from './services/FormulaEngine';
 import { FormulaDashboard } from './components/FormulaDashboard/FormulaDashboard';
+import { useGridStore } from './store/gridStore';
+import { useFormulaMetadataStore } from './store/formulaMetadataStore';
+import { parseCellAddress } from './lib/excel-coordinates';
 
 interface ColumnConfig {
     name: string;
@@ -29,6 +36,124 @@ function App() {
     const [sheets, setSheets] = useState<Sheet[]>([]);
     const [activeSheetId, setActiveSheetId] = useState<string | null>(null);
     const [isDashboardOpen, setIsDashboardOpen] = useState(false);
+    const [isMetadataPanelOpen, setIsMetadataPanelOpen] = useState(false);
+
+    // Grid store
+    const { 
+        selectedCell, 
+        selectedCells, 
+        currentFormula, 
+        setCurrentFormula,
+        setSchema: setStoreSchema
+    } = useGridStore();
+
+    // Formula metadata store
+    const { addFormula, updateFormula } = useFormulaMetadataStore();
+
+    // Sync schema with store
+    useEffect(() => {
+        setStoreSchema(schema);
+    }, [schema, setStoreSchema]);
+
+    // Formula handlers
+    const handleFormulaChange = (formula: string) => {
+        setCurrentFormula(formula);
+    };
+
+    const handleFormulaSubmit = (formula: string) => {
+        if (selectedCell) {
+            handleCellEdit(selectedCell.display, formula);
+        }
+    };
+
+    // Advanced formula handlers
+    const handleColumnFormula = async (column: string, formula: string) => {
+        if (!schema || !activeSheetId) return;
+        
+        try {
+            // Apply formula to entire column using SQL
+            const tableName = sheets.find(s => s.id === activeSheetId)?.tableName || 'main_dataset';
+            
+            // Get column name from column identifier
+            let columnName: string;
+            if (column.length === 1 && column.match(/[A-Z]/)) {
+                // It's a column letter like "A", "B"
+                const colIndex = column.charCodeAt(0) - 65;
+                columnName = schema.columns[colIndex]?.name;
+            } else {
+                // It's a column name
+                columnName = column;
+            }
+            
+            if (!columnName) {
+                alert('Column not found');
+                return;
+            }
+
+            // Add to formula metadata BEFORE applying
+            const currentSheet = sheets.find(s => s.id === activeSheetId);
+            const formulaId = addFormula({
+                sheetId: activeSheetId,
+                sheetName: currentSheet?.name || 'Unknown Sheet',
+                columnId: column,
+                formulaType: 'column',
+                formula: formula,
+                description: `Column formula applied to ${column} (${columnName}) - affects all ${schema.rowCount.toLocaleString()} rows`,
+                status: 'active'
+            });
+            
+            // Convert Excel formula to SQL expression
+            // For now, simple replacement - could be enhanced with proper parser
+            let sqlExpression = formula.substring(1); // Remove =
+            
+            // Simple replacements for common patterns
+            sqlExpression = sqlExpression.replace(/([A-Z]+)(\d+)/g, (match, col, row) => {
+                const colIndex = col.charCodeAt(0) - 65;
+                const colName = schema.columns[colIndex]?.name;
+                return colName || match;
+            });
+            
+            const sql = `UPDATE ${tableName} SET ${columnName} = ${sqlExpression}`;
+            
+            await query(sql);
+            
+            // Reload data
+            await loadSheetData(activeSheetId);
+            
+            // Update formula status to success
+            updateFormula(formulaId, {
+                status: 'active',
+                updatedAt: new Date()
+            });
+            
+            alert(`Applied formula to column ${column}`);
+            
+        } catch (err) {
+            console.error('Failed to apply column formula:', err);
+            
+            // Update formula status to error if we have the ID
+            // Note: In a real implementation, you'd want to track the formulaId better
+            alert('Failed to apply column formula: ' + (err instanceof Error ? err.message : 'Unknown error'));
+        }
+    };
+
+    const handleNamedCellFormula = async (cellName: string, formula: string) => {
+        if (!activeSheetId) return;
+        
+        // Add to formula metadata
+        const currentSheet = sheets.find(s => s.id === activeSheetId);
+        addFormula({
+            sheetId: activeSheetId,
+            sheetName: currentSheet?.name || 'Unknown Sheet',
+            formulaType: 'named',
+            formula: formula,
+            description: `Named reference "${cellName}" - ${formula}`,
+            status: 'active'
+        });
+        
+        console.log(`Creating named reference: ${cellName} = ${formula}`);
+        alert(`Named reference "${cellName}" created and tracked in metadata`);
+    };
 
     // Initial load
     useEffect(() => {
@@ -200,12 +325,19 @@ function App() {
         }
     };
 
-    const handleCellEdit = async (rowIndex: number, colIndex: number, newValue: string) => {
+    const handleCellEdit = async (cellAddress: string, newValue: string) => {
         if (!schema || !activeSheetId) return;
+
+        // Parse Excel address to get row/column indices
+        const coords = parseCellAddress(cellAddress);
+        const rowIndex = coords.rowIndex;
+        const colIndex = coords.colIndex;
 
         const columnName = schema.columns[colIndex].name;
         const pkColumn = schema.columns[0].name;
         const pkValue = gridData[rowIndex][0];
+
+        console.log('Updating cell:', { cellAddress, rowIndex, colIndex, columnName, pkValue, newValue });
 
         try {
             // Update Formula Engine
@@ -215,19 +347,32 @@ function App() {
             let valueToSend = newValue;
             let formulaToSend: string | undefined = undefined;
 
-            // If it's a formula, we want to display the calculated value but save the formula
+            // If it's a formula, track it in metadata and calculate value
             if (newValue.startsWith('=')) {
+                formulaToSend = newValue;
+                
+                // Add to formula metadata
+                const currentSheet = sheets.find(s => s.id === activeSheetId);
+                addFormula({
+                    sheetId: activeSheetId,
+                    sheetName: currentSheet?.name || 'Unknown Sheet',
+                    cellAddress: cellAddress,
+                    formulaType: 'cell',
+                    formula: newValue,
+                    description: `Formula applied to cell ${cellAddress}`,
+                    status: 'active'
+                });
+
                 // Get the calculated value from the engine
                 const calculatedValue = FormulaEngine.getInstance().getCellValue(activeSheetId, rowIndex, colIndex);
-                valueToSend = calculatedValue;
-                formulaToSend = newValue;
+                valueToSend = calculatedValue || newValue; // Fallback to original if calculation fails
 
                 // Update local state to show result
                 setGridData(prevData => {
                     const newData = [...prevData];
                     if (newData[rowIndex]) {
                         newData[rowIndex] = [...newData[rowIndex]];
-                        newData[rowIndex][colIndex] = calculatedValue;
+                        newData[rowIndex][colIndex] = calculatedValue || newValue;
                     }
                     return newData;
                 });
@@ -243,17 +388,26 @@ function App() {
                 });
             }
 
-            await api.updateCell({
-                table: sheets.find(s => s.id === activeSheetId)?.tableName || 'main_dataset',
+            // Find the correct table name
+            const tableName = sheets.find(s => s.id === activeSheetId)?.tableName || 'main_dataset';
+            
+            const updatePayload = {
+                table: tableName,
                 rowId: pkValue,
                 column: columnName,
                 value: valueToSend,
                 formula: formulaToSend
-            });
+            };
+            
+            console.log('Sending update payload:', updatePayload);
+
+            await api.updateCell(updatePayload);
 
         } catch (err) {
             console.error("Failed to update cell:", err);
-            alert("Failed to update cell");
+            // Revert local state on error
+            await loadSheetData(activeSheetId);
+            alert("Failed to update cell: " + (err instanceof Error ? err.message : 'Unknown error'));
         }
     };
 
@@ -587,6 +741,13 @@ function App() {
                             <span>ƒx</span> Formulas
                         </button>
                         <button
+                            onClick={() => setIsMetadataPanelOpen(true)}
+                            className="ml-2 px-3 py-1.5 text-xs text-purple-600 hover:bg-purple-50 rounded-md transition-colors border border-purple-200 flex items-center gap-1"
+                            title="View Formula Metadata"
+                        >
+                            <span>📋</span> Metadata
+                        </button>
+                        <button
                             onClick={handleClearDatabase}
                             className="ml-2 px-3 py-1.5 text-xs text-red-600 hover:bg-red-50 rounded-md transition-colors border border-red-200"
                             title="Clear all data from OPFS"
@@ -599,6 +760,24 @@ function App() {
 
             {/* Main Content */}
             <div className="flex-1 overflow-hidden flex flex-col min-h-0">
+                {/* Formula Bar - Only show when we have data */}
+                {schema && (
+                    <>
+                        <FormulaBar
+                            selectedCell={selectedCell}
+                            selectedRange={selectedCells}
+                            formula={currentFormula}
+                            onFormulaChange={handleFormulaChange}
+                            onFormulaSubmit={handleFormulaSubmit}
+                        />
+                        <AdvancedFormulaBar
+                            schema={schema}
+                            onColumnFormula={handleColumnFormula}
+                            onNamedCellFormula={handleNamedCellFormula}
+                        />
+                    </>
+                )}
+                
                 <div className="flex-1 overflow-hidden relative">
                     {!schema ? (
                         <div className="flex items-center justify-center h-full p-8">
@@ -612,16 +791,13 @@ function App() {
                             </div>
                         </div>
                     ) : (
-                        <VirtualGrid
+                        <ExcelGrid
                             schema={schema}
                             data={gridData}
                             isLoading={isLoading}
                             onCellEdit={handleCellEdit}
                             onColumnTypeChange={handleColumnTypeChange}
-                            onInsertRow={handleInsertRow}
-                            onDeleteRow={handleDeleteRow}
-                            onInsertColumn={handleInsertColumn}
-                            onDeleteColumn={handleDeleteColumn}
+                            sheetId={activeSheetId}
                         />
                     )}
                 </div>
@@ -671,6 +847,29 @@ function App() {
                     file={wizardFile}
                     onConfirm={handleWizardConfirm}
                     onCancel={() => setWizardFile(null)}
+                />
+            )}
+
+            {/* Formula Dashboard */}
+            {isDashboardOpen && (
+                <FormulaDashboard
+                    isOpen={isDashboardOpen}
+                    onClose={() => setIsDashboardOpen(false)}
+                    sheetId={activeSheetId}
+                    schema={schema}
+                    onApplyFormula={(formula) => {
+                        console.log('Apply formula:', formula);
+                        setIsDashboardOpen(false);
+                    }}
+                />
+            )}
+
+            {/* Formula Metadata Panel */}
+            {isMetadataPanelOpen && (
+                <FormulaMetadataPanel
+                    isOpen={isMetadataPanelOpen}
+                    onClose={() => setIsMetadataPanelOpen(false)}
+                    currentSheetId={activeSheetId || undefined}
                 />
             )}
         </div>

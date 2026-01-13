@@ -108,4 +108,44 @@ export class FormulaEngine {
     public isFormula(value: any): boolean {
         return typeof value === 'string' && value.startsWith('=');
     }
+
+    public setCellValue(sheetId: string, row: number, col: number, value: any, columnNames?: string[]): void {
+        const internalId = this.sheetMap.get(sheetId);
+        if (internalId === undefined) return;
+
+        try {
+            // Set the value in HyperFormula
+            this.hf.setCellContents(
+                { sheet: internalId, row, col },
+                value
+            );
+        } catch (error) {
+            console.error(`[FormulaEngine] Error setting cell value at ${row},${col}:`, error);
+        }
+    }
+
+    public getCellValue(sheetId: string, row: number, col: number): any {
+        const internalId = this.sheetMap.get(sheetId);
+        if (internalId === undefined) return null;
+
+        try {
+            return this.hf.getCellValue({ sheet: internalId, row, col });
+        } catch (error) {
+            console.error(`[FormulaEngine] Error getting cell value at ${row},${col}:`, error);
+            return null;
+        }
+    }
+
+    public getFormula(sheetId: string, row: number, col: number): string | null {
+        const internalId = this.sheetMap.get(sheetId);
+        if (internalId === undefined) return null;
+
+        try {
+            const formula = this.hf.getCellFormula({ sheet: internalId, row, col });
+            return formula ? `=${formula}` : null;
+        } catch (error) {
+            console.error(`[FormulaEngine] Error getting formula at ${row},${col}:`, error);
+            return null;
+        }
+    }
 }

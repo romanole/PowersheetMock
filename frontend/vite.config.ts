@@ -8,6 +8,7 @@ export default defineConfig({
     exclude: ['@duckdb/duckdb-wasm'],
   },
   server: {
+    port: 5374,
     headers: {
       'Cross-Origin-Embedder-Policy': 'require-corp',
       'Cross-Origin-Opener-Policy': 'same-origin',

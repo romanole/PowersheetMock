@@ -1,23 +1,34 @@
 import { useState, useEffect, useRef } from 'react';
 import type { TableSchema } from '../../types/database';
 import { FormulaEngine } from '../../services/FormulaEngine';
+import { 
+    createCellAddress, 
+    parseCellAddress, 
+    createRangeFromCoords, 
+    numberToColumn,
+    type ExcelCellAddress,
+    type ExcelRange 
+} from '../../lib/excel-coordinates';
 
 interface VirtualGridProps {
     schema: TableSchema;
     data: any[][];
     isLoading?: boolean;
-    onCellEdit?: (rowIndex: number, colIndex: number, newValue: string) => void;
+    onCellEdit?: (cellAddress: string, newValue: string) => void;
     onColumnTypeChange?: (colIndex: number, newType: string) => void;
     onInsertRow?: (rowIndex: number, position: 'above' | 'below') => void;
     onDeleteRow?: (rowIndex: number) => void;
     onInsertColumn?: (colIndex: number) => void;
     onDeleteColumn?: (colIndex: number) => void;
     sheetId: string | null;
+    selectedCell?: ExcelCellAddress | null;
+    selectedRange?: ExcelRange | null;
+    onCellSelect?: (cell: ExcelCellAddress) => void;
+    onRangeSelect?: (range: ExcelRange) => void;
 }
 
 interface EditingCell {
-    row: number;
-    col: number;
+    address: ExcelCellAddress;
     value: string;
 }
 
@@ -26,8 +37,7 @@ interface ContextMenu {
     y: number;
     type: 'row' | 'column' | 'cell';
     index: number;
-    row?: number;
-    col?: number;
+    cellAddress?: ExcelCellAddress;
 }
 
 const COLUMN_TYPES = [
@@ -51,9 +61,12 @@ export function VirtualGrid({
     onInsertColumn,
     onDeleteColumn,
     sheetId,
+    selectedCell,
+    selectedRange,
+    onCellSelect,
+    onRangeSelect,
 }: VirtualGridProps) {
     const [editingCell, setEditingCell] = useState<EditingCell | null>(null);
-    const [selectedCell, setSelectedCell] = useState<{ row: number; col: number } | null>(null);
     const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null);
     const gridRef = useRef<HTMLDivElement>(null);
 
@@ -61,9 +74,9 @@ export function VirtualGrid({
     const ROW_NUMBER_WIDTH = 50;
 
     const [isDragging, setIsDragging] = useState(false);
-    const [dragStart, setDragStart] = useState<{ row: number; col: number } | null>(null);
-    const [dragEnd, setDragEnd] = useState<{ row: number; col: number } | null>(null);
-    const [copiedCell, setCopiedCell] = useState<{ row: number; col: number } | null>(null);
+    const [dragStart, setDragStart] = useState<ExcelCellAddress | null>(null);
+    const [dragEnd, setDragEnd] = useState<ExcelCellAddress | null>(null);
+    const [copiedCell, setCopiedCell] = useState<ExcelCellAddress | null>(null);
 
     // Close context menu on click outside
     useEffect(() => {
@@ -92,30 +105,30 @@ export function VirtualGrid({
                 return;
             }
 
-            // Apply fill
-            const startRow = Math.min(dragStart.row, dragEnd.row);
-            const endRow = Math.max(dragStart.row, dragEnd.row);
-            const startCol = Math.min(dragStart.col, dragEnd.col);
-            const endCol = Math.max(dragStart.col, dragEnd.col);
+            // Apply fill using Excel coordinates
+            const startCoords = parseCellAddress(dragStart.display);
+            const endCoords = parseCellAddress(dragEnd.display);
+            
+            const startRow = Math.min(startCoords.rowIndex, endCoords.rowIndex);
+            const endRow = Math.max(startCoords.rowIndex, endCoords.rowIndex);
+            const startCol = Math.min(startCoords.colIndex, endCoords.colIndex);
+            const endCol = Math.max(startCoords.colIndex, endCoords.colIndex);
 
-            const sourceValue = data[dragStart.row][dragStart.col];
-            const sourceFormula = FormulaEngine.getInstance().getFormula(sheetId, dragStart.row, dragStart.col);
-
-            // Determine direction (only vertical or horizontal supported for simplicity)
-            // If dragging both ways, prioritize vertical
+            const sourceValue = data[startCoords.rowIndex][startCoords.colIndex];
+            const sourceFormula = FormulaEngine.getInstance().getFormula(sheetId, startCoords.rowIndex, startCoords.colIndex);
 
             // For now, simple fill: copy source to all cells in range
             for (let r = startRow; r <= endRow; r++) {
                 for (let c = startCol; c <= endCol; c++) {
-                    if (r === dragStart.row && c === dragStart.col) continue;
+                    if (r === startCoords.rowIndex && c === startCoords.colIndex) continue;
 
+                    const cellAddress = createCellAddress(r, c);
                     if (sourceFormula) {
                         // TODO: Adjust relative references
                         // For Phase 1, we just copy the formula exactly (absolute ref behavior)
-                        // Implementing relative ref adjustment requires parsing
-                        if (onCellEdit) onCellEdit(r, c, sourceFormula);
+                        if (onCellEdit) onCellEdit(cellAddress.display, sourceFormula);
                     } else {
-                        if (onCellEdit) onCellEdit(r, c, String(sourceValue));
+                        if (onCellEdit) onCellEdit(cellAddress.display, String(sourceValue));
                     }
                 }
             }
@@ -140,26 +153,27 @@ export function VirtualGrid({
 
             if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
                 e.preventDefault();
-                const { row, col } = selectedCell;
-                let newRow = row;
-                let newCol = col;
+                const coords = parseCellAddress(selectedCell.display);
+                let newRow = coords.rowIndex;
+                let newCol = coords.colIndex;
 
-                if (e.key === 'ArrowUp') newRow = Math.max(0, row - 1);
-                if (e.key === 'ArrowDown') newRow = Math.min(data.length - 1, row + 1);
-                if (e.key === 'ArrowLeft') newCol = Math.max(0, col - 1);
-                if (e.key === 'ArrowRight') newCol = Math.min(schema.columns.length - 1, col + 1);
+                if (e.key === 'ArrowUp') newRow = Math.max(0, coords.rowIndex - 1);
+                if (e.key === 'ArrowDown') newRow = Math.min(data.length - 1, coords.rowIndex + 1);
+                if (e.key === 'ArrowLeft') newCol = Math.max(0, coords.colIndex - 1);
+                if (e.key === 'ArrowRight') newCol = Math.min(schema.columns.length - 1, coords.colIndex + 1);
 
-                setSelectedCell({ row: newRow, col: newCol });
+                const newAddress = createCellAddress(newRow, newCol);
+                onCellSelect?.(newAddress);
                 return;
             }
 
             if (e.key === 'F2') {
                 e.preventDefault();
-                const currentValue = data[selectedCell.row][selectedCell.col];
-                const formula = sheetId ? FormulaEngine.getInstance().getFormula(sheetId, selectedCell.row, selectedCell.col) : null;
+                const coords = parseCellAddress(selectedCell.display);
+                const currentValue = data[coords.rowIndex][coords.colIndex];
+                const formula = sheetId ? FormulaEngine.getInstance().getFormula(sheetId, coords.rowIndex, coords.colIndex) : null;
                 setEditingCell({
-                    row: selectedCell.row,
-                    col: selectedCell.col,
+                    address: selectedCell,
                     value: formula || (currentValue !== null && currentValue !== undefined ? String(currentValue) : ''),
                 });
                 return;
@@ -168,8 +182,7 @@ export function VirtualGrid({
             if (e.key === 'Delete') {
                 e.preventDefault();
                 setEditingCell({
-                    row: selectedCell.row,
-                    col: selectedCell.col,
+                    address: selectedCell,
                     value: '',
                 });
                 return;
@@ -178,8 +191,7 @@ export function VirtualGrid({
             if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
                 e.preventDefault();
                 setEditingCell({
-                    row: selectedCell.row,
-                    col: selectedCell.col,
+                    address: selectedCell,
                     value: e.key,
                 });
             }
@@ -191,7 +203,7 @@ export function VirtualGrid({
 
     const handleCellBlur = () => {
         if (editingCell && onCellEdit) {
-            onCellEdit(editingCell.row, editingCell.col, editingCell.value);
+            onCellEdit(editingCell.address.display, editingCell.value);
         }
         setEditingCell(null);
     };
@@ -200,23 +212,26 @@ export function VirtualGrid({
         if (e.key === 'Enter') {
             e.preventDefault();
             handleCellBlur();
-            if (selectedCell) {
-                setSelectedCell({
-                    row: Math.min(data.length - 1, selectedCell.row + 1),
-                    col: selectedCell.col
-                });
+            if (selectedCell && onCellSelect) {
+                const coords = parseCellAddress(selectedCell.display);
+                const newRow = Math.min(data.length - 1, coords.rowIndex + 1);
+                const newAddress = createCellAddress(newRow, coords.colIndex);
+                onCellSelect(newAddress);
             }
         } else if (e.key === 'Escape') {
             setEditingCell(null);
         } else if (e.key === 'Tab') {
             e.preventDefault();
             handleCellBlur();
-            if (selectedCell) {
-                const newCol = selectedCell.col + 1;
+            if (selectedCell && onCellSelect) {
+                const coords = parseCellAddress(selectedCell.display);
+                const newCol = coords.colIndex + 1;
                 if (newCol >= schema.columns.length) {
-                    setSelectedCell({ row: selectedCell.row + 1, col: 0 });
+                    const newAddress = createCellAddress(coords.rowIndex + 1, 0);
+                    onCellSelect(newAddress);
                 } else {
-                    setSelectedCell({ row: selectedCell.row, col: newCol });
+                    const newAddress = createCellAddress(coords.rowIndex, newCol);
+                    onCellSelect(newAddress);
                 }
             }
         }
@@ -224,14 +239,12 @@ export function VirtualGrid({
 
     const handleRowContextMenu = (e: React.MouseEvent, rowIdx: number) => {
         e.preventDefault();
-        console.log('🔍 [CONTEXT MENU] Row context menu triggered:', rowIdx);
         setContextMenu({
             x: e.clientX,
             y: e.clientY,
             type: 'row',
             index: rowIdx,
         });
-        console.log('🔍 [CONTEXT MENU] Set context menu state:', { x: e.clientX, y: e.clientY, type: 'row', index: rowIdx });
     };
 
     const handleColumnContextMenu = (e: React.MouseEvent, colIdx: number) => {
@@ -281,16 +294,7 @@ export function VirtualGrid({
                                     onContextMenu={(e) => handleColumnContextMenu(e, idx)}
                                 >
                                     <div className="text-[10px] text-slate-500 font-mono mb-0.5">
-                                        {(() => {
-                                            let temp, letter = '';
-                                            let colIndex = idx;
-                                            while (colIndex >= 0) {
-                                                temp = (colIndex) % 26;
-                                                letter = String.fromCharCode(temp + 65) + letter;
-                                                colIndex = (colIndex - temp - 1) / 26;
-                                            }
-                                            return letter;
-                                        })()}
+                                        {numberToColumn(idx)}
                                     </div>
                                     <div className="truncate font-semibold text-center">{col.name}</div>
 
