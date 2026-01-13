@@ -55,6 +55,98 @@ function App() {
         setStoreSchema(schema);
     }, [schema, setStoreSchema]);
 
+    // Update formula bar when cell selection changes
+    useEffect(() => {
+        if (selectedCell && activeSheetId && schema) {
+            // Get formula from FormulaEngine
+            const formula = FormulaEngine.getInstance().getFormula(
+                activeSheetId,
+                selectedCell.row,
+                selectedCell.col
+            );
+            
+            if (formula) {
+                setCurrentFormula(formula);
+            } else {
+                // No formula, get the value
+                const colName = schema.columns[selectedCell.col]?.name;
+                if (colName && gridData[selectedCell.row]) {
+                    const value = gridData[selectedCell.row][selectedCell.col];
+                    setCurrentFormula(value !== null && value !== undefined ? String(value) : '');
+                } else {
+                    setCurrentFormula('');
+                }
+            }
+        } else {
+            setCurrentFormula('');
+        }
+    }, [selectedCell, activeSheetId, schema, gridData]);
+
+    // Load sheet data function (used by multiple handlers)
+    const loadSheetData = async (sheetId: string) => {
+        const sheet = sheets.find(s => s.id === sheetId);
+        if (!sheet) return;
+
+        setIsLoading(true);
+        setGridData([]);
+        setSchema(null);
+
+        try {
+            const tableSchema = await api.getSchema(sheet.tableName);
+            setSchema(tableSchema);
+
+            const result = await query(`SELECT * FROM ${sheet.tableName} LIMIT 1000`);
+            setGridData(result.rows);
+
+            FormulaEngine.getInstance().initializeSheet(sheetId, result.rows);
+
+            try {
+                const formulas = await api.getFormulas(sheet.tableName);
+                if (formulas && formulas.length > 0) {
+                    const columnNames = tableSchema.columns.map(c => c.name);
+                    const pkMap = new Map<string, number>();
+                    result.rows.forEach((row, index) => {
+                        pkMap.set(String(row[0]), index);
+                    });
+
+                    formulas.forEach(f => {
+                        const rowIndex = pkMap.get(String(f.rowId));
+                        const colIndex = columnNames.indexOf(f.column);
+
+                        if (rowIndex !== undefined && colIndex !== -1) {
+                            // Add to Formula Engine
+                            FormulaEngine.getInstance().setCellValue(
+                                sheetId,
+                                rowIndex,
+                                colIndex,
+                                f.formula,
+                                columnNames
+                            );
+                            
+                            // Also restore to metadata store
+                            const cellAddress = `${String.fromCharCode(65 + colIndex)}${rowIndex + 1}`;
+                            addFormula({
+                                sheetId: sheetId,
+                                sheetName: sheet.name,
+                                cellAddress: cellAddress,
+                                formulaType: 'cell',
+                                formula: f.formula,
+                                description: `Restored formula from database`,
+                                status: 'active'
+                            });
+                        }
+                    });
+                }
+            } catch (fErr) {
+                console.warn("Failed to load formulas:", fErr);
+            }
+        } catch (err) {
+            console.error("Failed to load sheet data:", err);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
     // Formula handlers
     const handleFormulaChange = (formula: string) => {
         setCurrentFormula(formula);
@@ -203,66 +295,7 @@ function App() {
     // Load data when active sheet changes
     useEffect(() => {
         if (!activeSheetId || !sheets.length) return;
-
-        const activeSheet = sheets.find(s => s.id === activeSheetId);
-        if (!activeSheet) return;
-
-        const loadSheetData = async () => {
-            setIsLoading(true);
-            // Clear previous data to avoid confusion
-            setGridData([]);
-            setSchema(null);
-
-            try {
-                const tableSchema = await api.getSchema(activeSheet.tableName);
-                setSchema(tableSchema);
-
-                const result = await query(`SELECT * FROM ${activeSheet.tableName} LIMIT 1000`);
-                setGridData(result.rows);
-
-                // Initialize Formula Engine
-                FormulaEngine.getInstance().initializeSheet(activeSheetId, result.rows);
-
-                // Load formulas
-                try {
-                    const formulas = await api.getFormulas(activeSheet.tableName);
-                    if (formulas && formulas.length > 0) {
-                        const columnNames = tableSchema.columns.map(c => c.name);
-                        // Create a map of PK value -> row index
-                        // Assuming first column is PK
-                        const pkMap = new Map<string, number>();
-                        result.rows.forEach((row, index) => {
-                            pkMap.set(String(row[0]), index);
-                        });
-
-                        formulas.forEach(f => {
-                            const rowIndex = pkMap.get(String(f.rowId));
-                            const colIndex = columnNames.indexOf(f.column);
-
-                            if (rowIndex !== undefined && colIndex !== -1) {
-                                FormulaEngine.getInstance().setCellValue(
-                                    activeSheetId,
-                                    rowIndex,
-                                    colIndex,
-                                    f.formula,
-                                    columnNames
-                                );
-                            }
-                        });
-                        console.log(`[App] Loaded ${formulas.length} formulas`);
-                    }
-                } catch (fErr) {
-                    console.warn("Failed to load formulas:", fErr);
-                }
-
-            } catch (err) {
-                console.error("Failed to load sheet data:", err);
-            } finally {
-                setIsLoading(false);
-            }
-        };
-
-        loadSheetData();
+        loadSheetData(activeSheetId);
     }, [activeSheetId, sheets]);
 
     const handleFileSelect = async (file: File) => {
