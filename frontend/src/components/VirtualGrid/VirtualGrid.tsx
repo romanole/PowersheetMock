@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import type { TableSchema } from '../../types/database';
+import { FormulaEngine } from '../../services/FormulaEngine';
 
 interface VirtualGridProps {
     schema: TableSchema;
@@ -11,6 +12,7 @@ interface VirtualGridProps {
     onDeleteRow?: (rowIndex: number) => void;
     onInsertColumn?: (colIndex: number) => void;
     onDeleteColumn?: (colIndex: number) => void;
+    sheetId: string | null;
 }
 
 interface EditingCell {
@@ -22,8 +24,10 @@ interface EditingCell {
 interface ContextMenu {
     x: number;
     y: number;
-    type: 'row' | 'column';
+    type: 'row' | 'column' | 'cell';
     index: number;
+    row?: number;
+    col?: number;
 }
 
 const COLUMN_TYPES = [
@@ -46,6 +50,7 @@ export function VirtualGrid({
     onDeleteRow,
     onInsertColumn,
     onDeleteColumn,
+    sheetId,
 }: VirtualGridProps) {
     const [editingCell, setEditingCell] = useState<EditingCell | null>(null);
     const [selectedCell, setSelectedCell] = useState<{ row: number; col: number } | null>(null);
@@ -55,12 +60,78 @@ export function VirtualGrid({
     const COLUMN_WIDTH = 120;
     const ROW_NUMBER_WIDTH = 50;
 
+    const [isDragging, setIsDragging] = useState(false);
+    const [dragStart, setDragStart] = useState<{ row: number; col: number } | null>(null);
+    const [dragEnd, setDragEnd] = useState<{ row: number; col: number } | null>(null);
+    const [copiedCell, setCopiedCell] = useState<{ row: number; col: number } | null>(null);
+
     // Close context menu on click outside
     useEffect(() => {
         const handleClick = () => setContextMenu(null);
         window.addEventListener('click', handleClick);
         return () => window.removeEventListener('click', handleClick);
     }, []);
+
+    // Drag to fill logic
+    useEffect(() => {
+        const handleMouseMove = (e: MouseEvent) => {
+            if (!isDragging || !dragStart || !gridRef.current) return;
+
+            // Calculate which cell we are over
+            // This is a simplified version; ideally we'd use elementFromPoint or similar
+            // For now, let's just rely on mouse events on cells if possible, but global mouse move is better for dragging outside
+            // A better approach for this mock:
+            // We'll rely on onMouseEnter of cells to update dragEnd
+        };
+
+        const handleMouseUp = async () => {
+            if (!isDragging || !dragStart || !dragEnd || !sheetId) {
+                setIsDragging(false);
+                setDragStart(null);
+                setDragEnd(null);
+                return;
+            }
+
+            // Apply fill
+            const startRow = Math.min(dragStart.row, dragEnd.row);
+            const endRow = Math.max(dragStart.row, dragEnd.row);
+            const startCol = Math.min(dragStart.col, dragEnd.col);
+            const endCol = Math.max(dragStart.col, dragEnd.col);
+
+            const sourceValue = data[dragStart.row][dragStart.col];
+            const sourceFormula = FormulaEngine.getInstance().getFormula(sheetId, dragStart.row, dragStart.col);
+
+            // Determine direction (only vertical or horizontal supported for simplicity)
+            // If dragging both ways, prioritize vertical
+
+            // For now, simple fill: copy source to all cells in range
+            for (let r = startRow; r <= endRow; r++) {
+                for (let c = startCol; c <= endCol; c++) {
+                    if (r === dragStart.row && c === dragStart.col) continue;
+
+                    if (sourceFormula) {
+                        // TODO: Adjust relative references
+                        // For Phase 1, we just copy the formula exactly (absolute ref behavior)
+                        // Implementing relative ref adjustment requires parsing
+                        if (onCellEdit) onCellEdit(r, c, sourceFormula);
+                    } else {
+                        if (onCellEdit) onCellEdit(r, c, String(sourceValue));
+                    }
+                }
+            }
+
+            setIsDragging(false);
+            setDragStart(null);
+            setDragEnd(null);
+        };
+
+        if (isDragging) {
+            window.addEventListener('mouseup', handleMouseUp);
+        }
+        return () => {
+            window.removeEventListener('mouseup', handleMouseUp);
+        };
+    }, [isDragging, dragStart, dragEnd, data, sheetId, onCellEdit]);
 
     // Excel-style editing
     useEffect(() => {
@@ -85,10 +156,11 @@ export function VirtualGrid({
             if (e.key === 'F2') {
                 e.preventDefault();
                 const currentValue = data[selectedCell.row][selectedCell.col];
+                const formula = sheetId ? FormulaEngine.getInstance().getFormula(sheetId, selectedCell.row, selectedCell.col) : null;
                 setEditingCell({
                     row: selectedCell.row,
                     col: selectedCell.col,
-                    value: currentValue !== null && currentValue !== undefined ? String(currentValue) : '',
+                    value: formula || (currentValue !== null && currentValue !== undefined ? String(currentValue) : ''),
                 });
                 return;
             }
@@ -208,6 +280,18 @@ export function VirtualGrid({
                                     style={{ width: `${COLUMN_WIDTH}px`, minWidth: `${COLUMN_WIDTH}px` }}
                                     onContextMenu={(e) => handleColumnContextMenu(e, idx)}
                                 >
+                                    <div className="text-[10px] text-slate-500 font-mono mb-0.5">
+                                        {(() => {
+                                            let temp, letter = '';
+                                            let colIndex = idx;
+                                            while (colIndex >= 0) {
+                                                temp = (colIndex) % 26;
+                                                letter = String.fromCharCode(temp + 65) + letter;
+                                                colIndex = (colIndex - temp - 1) / 26;
+                                            }
+                                            return letter;
+                                        })()}
+                                    </div>
                                     <div className="truncate font-semibold text-center">{col.name}</div>
 
                                     <select
@@ -245,15 +329,51 @@ export function VirtualGrid({
                                     const isEditing = editingCell?.row === rowIdx && editingCell?.col === cellIdx;
                                     const isSelected = selectedCell?.row === rowIdx && selectedCell?.col === cellIdx;
 
+                                    // Check if in drag range
+                                    let isInDragRange = false;
+                                    if (isDragging && dragStart && dragEnd) {
+                                        const minRow = Math.min(dragStart.row, dragEnd.row);
+                                        const maxRow = Math.max(dragStart.row, dragEnd.row);
+                                        const minCol = Math.min(dragStart.col, dragEnd.col);
+                                        const maxCol = Math.max(dragStart.col, dragEnd.col);
+                                        isInDragRange = rowIdx >= minRow && rowIdx <= maxRow && cellIdx >= minCol && cellIdx <= maxCol;
+                                    }
+
                                     return (
                                         <td
                                             key={cellIdx}
                                             className={`border border-slate-300 px-0 py-0 text-sm cursor-cell
-                        ${isSelected && !isEditing ? 'ring-2 ring-blue-500 z-20' : 'bg-white hover:bg-blue-50'}
+                        ${isSelected && !isEditing ? 'ring-2 ring-blue-500 z-20' : ''}
+                        ${isInDragRange ? 'bg-blue-100' : 'bg-white hover:bg-blue-50'}
                       `}
                                             style={{
                                                 width: `${COLUMN_WIDTH}px`,
                                                 minWidth: `${COLUMN_WIDTH}px`,
+                                            }}
+                                            onMouseEnter={() => {
+                                                if (isDragging) {
+                                                    setDragEnd({ row: rowIdx, col: cellIdx });
+                                                }
+                                            }}
+                                            onContextMenu={(e) => {
+                                                e.preventDefault();
+                                                setContextMenu({
+                                                    x: e.clientX,
+                                                    y: e.clientY,
+                                                    type: 'cell',
+                                                    index: -1, // Not used for cell type
+                                                    row: rowIdx,
+                                                    col: cellIdx
+                                                });
+                                            }}
+                                            onDoubleClick={() => {
+                                                const currentValue = data[rowIdx][cellIdx];
+                                                const formula = sheetId ? FormulaEngine.getInstance().getFormula(sheetId, rowIdx, cellIdx) : null;
+                                                setEditingCell({
+                                                    row: rowIdx,
+                                                    col: cellIdx,
+                                                    value: formula || (currentValue !== null && currentValue !== undefined ? String(currentValue) : ''),
+                                                });
                                             }}
                                             onClick={() => {
                                                 setSelectedCell({ row: rowIdx, col: cellIdx });
@@ -276,8 +396,25 @@ export function VirtualGrid({
                                                     className={`px-2 py-1 truncate ${isNumeric ? 'text-right font-mono' : 'text-left'}`}
                                                     title={String(cell)}
                                                 >
-                                                    {cell !== null && cell !== undefined ? String(cell) : ''}
+                                                    {(() => {
+                                                        if (sheetId && typeof cell === 'string' && cell.startsWith('=')) {
+                                                            const result = FormulaEngine.getInstance().getCellValue(sheetId, rowIdx, cellIdx);
+                                                            return result !== null ? String(result) : '#ERROR';
+                                                        }
+                                                        return cell !== null && cell !== undefined ? String(cell) : '';
+                                                    })()}
                                                 </div>
+                                            )}
+                                            {isSelected && !isEditing && (
+                                                <div
+                                                    className="absolute bottom-[-4px] right-[-4px] w-3 h-3 bg-blue-500 border-2 border-white cursor-crosshair z-30"
+                                                    onMouseDown={(e) => {
+                                                        e.stopPropagation();
+                                                        setIsDragging(true);
+                                                        setDragStart({ row: rowIdx, col: cellIdx });
+                                                        setDragEnd({ row: rowIdx, col: cellIdx });
+                                                    }}
+                                                />
                                             )}
                                         </td>
                                     );
@@ -326,7 +463,7 @@ export function VirtualGrid({
                                 <span>🗑️</span> Delete Row
                             </button>
                         </>
-                    ) : (
+                    ) : contextMenu.type === 'column' ? (
                         <>
                             <button
                                 className="w-full text-left px-3 py-1.5 text-sm hover:bg-blue-50 flex items-center gap-2"
@@ -346,6 +483,32 @@ export function VirtualGrid({
                                 }}
                             >
                                 <span>🗑️</span> Delete Column
+                            </button>
+                        </>
+                    ) : (
+                        <>
+                            <button
+                                className="w-full text-left px-3 py-1.5 text-sm hover:bg-blue-50 flex items-center gap-2"
+                                onClick={() => {
+                                    if (contextMenu.row !== undefined && contextMenu.col !== undefined && sheetId && onCellEdit) {
+                                        const sourceFormula = FormulaEngine.getInstance().getFormula(sheetId, contextMenu.row, contextMenu.col);
+                                        const sourceValue = data[contextMenu.row][contextMenu.col];
+                                        const content = sourceFormula || String(sourceValue);
+
+                                        // Apply to all rows in this column
+                                        // TODO: This should ideally be a batch update or SQL operation
+                                        // For now, loop through client data (limited to loaded rows)
+                                        // WARNING: This only updates loaded rows!
+                                        for (let r = 0; r < data.length; r++) {
+                                            if (r !== contextMenu.row) {
+                                                onCellEdit(r, contextMenu.col, content);
+                                            }
+                                        }
+                                    }
+                                    setContextMenu(null);
+                                }}
+                            >
+                                <span>🚀</span> Apply to Column
                             </button>
                         </>
                     )}

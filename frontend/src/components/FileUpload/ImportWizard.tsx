@@ -210,6 +210,36 @@ export function ImportWizard({ file, onConfirm, onCancel }: ImportWizardProps) {
                             </p>
 
                             <div className="space-y-2">
+                                <div className="p-4 bg-blue-50 border border-blue-100 rounded-lg mb-4">
+                                    <label className="block text-sm font-medium text-blue-900 mb-2">
+                                        Decimal Separator
+                                    </label>
+                                    <div className="flex gap-4">
+                                        <label className="flex items-center gap-2 cursor-pointer">
+                                            <input
+                                                type="radio"
+                                                name="decimalSeparator"
+                                                value="."
+                                                defaultChecked
+                                                className="text-blue-600 focus:ring-blue-500"
+                                            />
+                                            <span className="text-sm text-blue-800">Dot (.) - e.g. 123.45</span>
+                                        </label>
+                                        <label className="flex items-center gap-2 cursor-pointer">
+                                            <input
+                                                type="radio"
+                                                name="decimalSeparator"
+                                                value=","
+                                                className="text-blue-600 focus:ring-blue-500"
+                                            />
+                                            <span className="text-sm text-blue-800">Comma (,) - e.g. 123,45</span>
+                                        </label>
+                                    </div>
+                                    <p className="text-xs text-blue-600 mt-2">
+                                        Select the separator used in your CSV file for numbers.
+                                    </p>
+                                </div>
+
                                 {columnConfigs.map((config, idx) => (
                                     <div
                                         key={idx}

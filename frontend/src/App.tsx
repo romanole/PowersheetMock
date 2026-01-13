@@ -5,7 +5,11 @@ import api from './api/client';
 import { DropZone } from './components/FileUpload/DropZone';
 import { ImportWizard } from './components/FileUpload/ImportWizard';
 import { VirtualGrid } from './components/VirtualGrid/VirtualGrid';
+import { SheetTabs } from './components/SheetTabs/SheetTabs';
 import type { TableSchema } from './types/database';
+import type { Sheet } from './api/client';
+import { FormulaEngine } from './services/FormulaEngine';
+import { FormulaDashboard } from './components/FormulaDashboard/FormulaDashboard';
 
 interface ColumnConfig {
     name: string;
@@ -21,32 +25,120 @@ function App() {
     const [loadError, setLoadError] = useState<string | null>(null);
     const [wizardFile, setWizardFile] = useState<File | null>(null);
 
-    // Auto-restore data from backend database on mount
+    // Multi-sheet state
+    const [sheets, setSheets] = useState<Sheet[]>([]);
+    const [activeSheetId, setActiveSheetId] = useState<string | null>(null);
+    const [isDashboardOpen, setIsDashboardOpen] = useState(false);
+
+    // Initial load
     useEffect(() => {
         if (!isInitialized) return;
 
-        console.log('🔍 [Backend] Checking for existing data...');
+        const init = async () => {
+            try {
+                // Load sheets
+                const sheetList = await api.listSheets();
+                setSheets(sheetList);
 
-        getSchema()
-            .then(async (tableSchema) => {
-                if (tableSchema && tableSchema.rowCount > 0) {
-                    setSchema(tableSchema);
-
-                    const result = await query('SELECT * FROM main_dataset LIMIT 50');
-                    setGridData(result.rows);
-
-                    console.log('✅ [Backend] Restored from database:', {
-                        rows: tableSchema.rowCount.toLocaleString(),
-                        columns: tableSchema.columns.length
-                    });
+                if (sheetList.length > 0) {
+                    // If sheets exist, load the first one
+                    setActiveSheetId(sheetList[0].id);
                 } else {
-                    console.log('ℹ️ [Backend] No existing data found');
+                    // If no sheets, check for main_dataset (legacy/import)
+                    try {
+                        const tableSchema = await getSchema();
+                        if (tableSchema) {
+                            // Create a default sheet wrapper for existing data
+                            const defaultSheet = await api.createSheet("Sheet 1");
+                            // TODO: In a real migration we would rename main_dataset to the new sheet table
+                            // For now, we just start fresh or load if we have sheets
+                            setSheets([defaultSheet]);
+                            setActiveSheetId(defaultSheet.id);
+                        } else {
+                            // Create initial empty sheet
+                            const newSheet = await api.createSheet("Sheet 1");
+                            setSheets([newSheet]);
+                            setActiveSheetId(newSheet.id);
+                        }
+                    } catch (e) {
+                        // Create initial empty sheet
+                        const newSheet = await api.createSheet("Sheet 1");
+                        setSheets([newSheet]);
+                        setActiveSheetId(newSheet.id);
+                    }
                 }
-            })
-            .catch((err) => {
-                console.log('ℹ️ [Backend] No existing data to restore:', err.message);
-            });
-    }, [isInitialized, getSchema, query]);
+            } catch (err) {
+                console.error("Failed to initialize sheets:", err);
+            }
+        };
+
+        init();
+    }, [isInitialized]);
+
+    // Load data when active sheet changes
+    useEffect(() => {
+        if (!activeSheetId || !sheets.length) return;
+
+        const activeSheet = sheets.find(s => s.id === activeSheetId);
+        if (!activeSheet) return;
+
+        const loadSheetData = async () => {
+            setIsLoading(true);
+            // Clear previous data to avoid confusion
+            setGridData([]);
+            setSchema(null);
+
+            try {
+                const tableSchema = await api.getSchema(activeSheet.tableName);
+                setSchema(tableSchema);
+
+                const result = await query(`SELECT * FROM ${activeSheet.tableName} LIMIT 1000`);
+                setGridData(result.rows);
+
+                // Initialize Formula Engine
+                FormulaEngine.getInstance().initializeSheet(activeSheetId, result.rows);
+
+                // Load formulas
+                try {
+                    const formulas = await api.getFormulas(activeSheet.tableName);
+                    if (formulas && formulas.length > 0) {
+                        const columnNames = tableSchema.columns.map(c => c.name);
+                        // Create a map of PK value -> row index
+                        // Assuming first column is PK
+                        const pkMap = new Map<string, number>();
+                        result.rows.forEach((row, index) => {
+                            pkMap.set(String(row[0]), index);
+                        });
+
+                        formulas.forEach(f => {
+                            const rowIndex = pkMap.get(String(f.rowId));
+                            const colIndex = columnNames.indexOf(f.column);
+
+                            if (rowIndex !== undefined && colIndex !== -1) {
+                                FormulaEngine.getInstance().setCellValue(
+                                    activeSheetId,
+                                    rowIndex,
+                                    colIndex,
+                                    f.formula,
+                                    columnNames
+                                );
+                            }
+                        });
+                        console.log(`[App] Loaded ${formulas.length} formulas`);
+                    }
+                } catch (fErr) {
+                    console.warn("Failed to load formulas:", fErr);
+                }
+
+            } catch (err) {
+                console.error("Failed to load sheet data:", err);
+            } finally {
+                setIsLoading(false);
+            }
+        };
+
+        loadSheetData();
+    }, [activeSheetId, sheets]);
 
     const handleFileSelect = async (file: File) => {
         setWizardFile(file);
@@ -73,23 +165,29 @@ function App() {
             const uploadResult = await registerFile(wizardFile);
             console.log(`✓ File uploaded: ${uploadResult.rows.toLocaleString()} rows, ${uploadResult.columns} columns`);
 
-            // Get schema from backend
-            const tableSchema = await getSchema();
-            setSchema(tableSchema);
-            console.log(`✓ Schema loaded`);
+            // Refresh sheets list to pick up the new sheet (migrated from main_dataset)
+            const sheetList = await api.listSheets();
+            setSheets(sheetList);
 
-            // Fetch initial data
-            const result = await query('SELECT * FROM main_dataset LIMIT 50');
-            setGridData(result.rows);
-            console.log(`✓ Initial data loaded`);
+            // Switch to the new sheet using ID from response
+            if (uploadResult.sheetId) {
+                setActiveSheetId(uploadResult.sheetId);
+                console.log(`✓ Switched to new sheet: ${uploadResult.sheetName}`);
+            } else {
+                // Fallback for legacy response
+                const importedSheet = sheetList.find(s => s.tableName === uploadResult.tableName);
+                if (importedSheet) {
+                    setActiveSheetId(importedSheet.id);
+                }
+            }
 
             setWizardFile(null);
 
             const totalTime = performance.now() - startTime;
 
             console.log('✅ [IMPORT COMPLETE]', {
-                rows: tableSchema.rowCount.toLocaleString(),
-                columns: tableSchema.columns.length,
+                rows: uploadResult.rows.toLocaleString(),
+                columns: uploadResult.columns,
                 totalTime: `${(totalTime / 1000).toFixed(2)}s`
             });
         } catch (err) {
@@ -103,27 +201,59 @@ function App() {
     };
 
     const handleCellEdit = async (rowIndex: number, colIndex: number, newValue: string) => {
-        if (!schema) return;
+        if (!schema || !activeSheetId) return;
 
         const columnName = schema.columns[colIndex].name;
         const pkColumn = schema.columns[0].name;
         const pkValue = gridData[rowIndex][0];
 
         try {
-            await query(`
-        UPDATE main_dataset 
-        SET "${columnName}" = '${newValue.replace(/'/g, "''")}'  
-        WHERE "${pkColumn}" = '${String(pkValue).replace(/'/g, "''")}'
-      `);
+            // Update Formula Engine
+            const columnNames = schema.columns.map(c => c.name);
+            FormulaEngine.getInstance().setCellValue(activeSheetId, rowIndex, colIndex, newValue, columnNames);
 
-            const newData = [...gridData];
-            newData[rowIndex][colIndex] = newValue;
-            setGridData(newData);
+            let valueToSend = newValue;
+            let formulaToSend: string | undefined = undefined;
 
-            console.log('[App] ✅ Cell updated');
+            // If it's a formula, we want to display the calculated value but save the formula
+            if (newValue.startsWith('=')) {
+                // Get the calculated value from the engine
+                const calculatedValue = FormulaEngine.getInstance().getCellValue(activeSheetId, rowIndex, colIndex);
+                valueToSend = calculatedValue;
+                formulaToSend = newValue;
+
+                // Update local state to show result
+                setGridData(prevData => {
+                    const newData = [...prevData];
+                    if (newData[rowIndex]) {
+                        newData[rowIndex] = [...newData[rowIndex]];
+                        newData[rowIndex][colIndex] = calculatedValue;
+                    }
+                    return newData;
+                });
+            } else {
+                // Update local state
+                setGridData(prevData => {
+                    const newData = [...prevData];
+                    if (newData[rowIndex]) {
+                        newData[rowIndex] = [...newData[rowIndex]];
+                        newData[rowIndex][colIndex] = newValue;
+                    }
+                    return newData;
+                });
+            }
+
+            await api.updateCell({
+                table: sheets.find(s => s.id === activeSheetId)?.tableName || 'main_dataset',
+                rowId: pkValue,
+                column: columnName,
+                value: valueToSend,
+                formula: formulaToSend
+            });
+
         } catch (err) {
-            console.error('[App] ❌ Cell update failed:', err);
-            alert('Failed to update cell');
+            console.error("Failed to update cell:", err);
+            alert("Failed to update cell");
         }
     };
 
@@ -168,14 +298,17 @@ function App() {
                 return `"${col.name}"`;
             }).join(', ');
 
-            await query('CREATE TABLE temp_new AS SELECT ' + newColumnDefs + ' FROM main_dataset');
-            await query('DROP TABLE main_dataset');
-            await query('ALTER TABLE temp_new RENAME TO main_dataset');
+
+            const tableName = sheets.find(s => s.id === activeSheetId)?.tableName || 'main_dataset';
+
+            await query(`CREATE TABLE temp_new AS SELECT ${newColumnDefs} FROM ${tableName}`);
+            await query(`DROP TABLE ${tableName}`);
+            await query(`ALTER TABLE temp_new RENAME TO ${tableName}`);
 
             const newSchema = await getSchema();
             setSchema(newSchema);
 
-            const result = await query('SELECT * FROM main_dataset LIMIT 50');
+            const result = await query(`SELECT * FROM ${tableName} LIMIT 50`);
             setGridData(result.rows);
 
             console.log('[App] ✅ Column type changed to', newType);
@@ -308,6 +441,51 @@ function App() {
         }
     };
 
+    const handleAddSheet = async () => {
+        try {
+            const name = `Sheet ${sheets.length + 1}`;
+            const newSheet = await api.createSheet(name);
+            setSheets([...sheets, newSheet]);
+            setActiveSheetId(newSheet.id);
+        } catch (err) {
+            console.error("Failed to create sheet:", err);
+            alert("Failed to create sheet");
+        }
+    };
+
+    const handleDeleteSheet = async (sheetId: string) => {
+        if (sheets.length <= 1) {
+            alert("Cannot delete the last sheet");
+            return;
+        }
+
+        const confirmed = confirm("Are you sure you want to delete this sheet?");
+        if (!confirmed) return;
+
+        try {
+            await api.deleteSheet(sheetId);
+            const newSheets = sheets.filter(s => s.id !== sheetId);
+            setSheets(newSheets);
+
+            if (activeSheetId === sheetId) {
+                setActiveSheetId(newSheets[0].id);
+            }
+        } catch (err) {
+            console.error("Failed to delete sheet:", err);
+            alert("Failed to delete sheet");
+        }
+    };
+
+    const handleRenameSheet = async (sheetId: string, newName: string) => {
+        try {
+            const updatedSheet = await api.renameSheet(sheetId, newName);
+            setSheets(sheets.map(s => s.id === sheetId ? updatedSheet : s));
+        } catch (err) {
+            console.error("Failed to rename sheet:", err);
+            alert("Failed to rename sheet");
+        }
+    };
+
     const handleClearDatabase = async () => {
         const confirmed = confirm(
             'Delete ALL data from database?\n\nThis will:\n- Remove all imported data\n- Clear OPFS storage\n- Cannot be undone\n\nContinue?'
@@ -317,8 +495,14 @@ function App() {
         try {
             setIsLoading(true);
             await query('DROP TABLE IF EXISTS main_dataset');
+            // Also drop all sheet tables if we want a full clear, but for now just main_dataset
+            // Ideally we should call a backend endpoint to clear everything
+
             setSchema(null);
             setGridData([]);
+            setSheets([]);
+            setActiveSheetId(null);
+
             console.log('✅ [OPFS] Database cleared');
             alert('Database cleared successfully!');
         } catch (err) {
@@ -394,42 +578,63 @@ function App() {
                 </button>
 
                 {schema && (
-                    <button
-                        onClick={handleClearDatabase}
-                        className="ml-2 px-3 py-1.5 text-xs text-red-600 hover:bg-red-50 rounded-md transition-colors border border-red-200"
-                        title="Clear all data from OPFS"
-                    >
-                        Clear Database
-                    </button>
+                    <>
+                        <button
+                            onClick={() => setIsDashboardOpen(true)}
+                            className="ml-2 px-3 py-1.5 text-xs text-blue-600 hover:bg-blue-50 rounded-md transition-colors border border-blue-200 flex items-center gap-1"
+                            title="Open Formula Dashboard"
+                        >
+                            <span>ƒx</span> Formulas
+                        </button>
+                        <button
+                            onClick={handleClearDatabase}
+                            className="ml-2 px-3 py-1.5 text-xs text-red-600 hover:bg-red-50 rounded-md transition-colors border border-red-200"
+                            title="Clear all data from OPFS"
+                        >
+                            Clear Database
+                        </button>
+                    </>
                 )}
             </div>
 
             {/* Main Content */}
-            <div className="flex-1 overflow-hidden">
-                {!schema ? (
-                    <div className="flex items-center justify-center h-full p-8">
-                        <div className="w-full max-w-2xl">
-                            <DropZone onFileLoad={handleFileSelect} isLoading={isLoading} />
-                            {loadError && (
-                                <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-lg">
-                                    <p className="text-red-700 text-sm">❌ {loadError}</p>
-                                </div>
-                            )}
+            <div className="flex-1 overflow-hidden flex flex-col min-h-0">
+                <div className="flex-1 overflow-hidden relative">
+                    {!schema ? (
+                        <div className="flex items-center justify-center h-full p-8">
+                            <div className="w-full max-w-2xl">
+                                <DropZone onFileLoad={handleFileSelect} isLoading={isLoading} />
+                                {loadError && (
+                                    <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-lg">
+                                        <p className="text-red-700 text-sm">❌ {loadError}</p>
+                                    </div>
+                                )}
+                            </div>
                         </div>
-                    </div>
-                ) : (
-                    <VirtualGrid
-                        schema={schema}
-                        data={gridData}
-                        isLoading={isLoading}
-                        onCellEdit={handleCellEdit}
-                        onColumnTypeChange={handleColumnTypeChange}
-                        onInsertRow={handleInsertRow}
-                        onDeleteRow={handleDeleteRow}
-                        onInsertColumn={handleInsertColumn}
-                        onDeleteColumn={handleDeleteColumn}
-                    />
-                )}
+                    ) : (
+                        <VirtualGrid
+                            schema={schema}
+                            data={gridData}
+                            isLoading={isLoading}
+                            onCellEdit={handleCellEdit}
+                            onColumnTypeChange={handleColumnTypeChange}
+                            onInsertRow={handleInsertRow}
+                            onDeleteRow={handleDeleteRow}
+                            onInsertColumn={handleInsertColumn}
+                            onDeleteColumn={handleDeleteColumn}
+                        />
+                    )}
+                </div>
+
+                {/* Sheet Tabs */}
+                <SheetTabs
+                    sheets={sheets}
+                    activeSheetId={activeSheetId}
+                    onSheetChange={setActiveSheetId}
+                    onAddSheet={handleAddSheet}
+                    onDeleteSheet={handleDeleteSheet}
+                    onRenameSheet={handleRenameSheet}
+                />
             </div>
 
             {/* Status Bar */}

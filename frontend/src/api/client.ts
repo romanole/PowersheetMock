@@ -33,6 +33,16 @@ export interface UploadResponse {
     rows: number;
     columns: number;
     sizeMb: number;
+    sheetId: string;
+    sheetName: string;
+}
+
+export interface Sheet {
+    id: string;
+    name: string;
+    tableName: string;
+    rowCount: number;
+    columnCount: number;
 }
 
 export const api = {
@@ -77,14 +87,26 @@ export const api = {
         table: string,
         rowId: number,
         column: string,
-        value: any
+        value: any,
+        formula?: string
     ): Promise<void> => {
         await apiClient.post('/cell/update', {
             table,
             rowId,
             column,
             value,
+            formula
         });
+    },
+
+    /**
+     * Get all formulas for a table
+     */
+    getFormulas: async (table: string): Promise<Array<{ rowId: string | number, column: string, formula: string }>> => {
+        const response = await apiClient.get('/formulas', {
+            params: { table }
+        });
+        return response.data;
     },
 
     /**
@@ -147,10 +169,47 @@ export const api = {
     },
 
     /**
+     * List all sheets
+     */
+    listSheets: async (): Promise<Sheet[]> => {
+        const response = await apiClient.get<Sheet[]>('/sheets');
+        return response.data;
+    },
+
+    /**
+     * Create new sheet
+     */
+    createSheet: async (name: string, columns: number = 20, rows: number = 1000): Promise<Sheet> => {
+        const response = await apiClient.post<Sheet>('/sheets/create', {
+            name,
+            columns,
+            rows
+        });
+        return response.data;
+    },
+
+    /**
+     * Delete sheet
+     */
+    deleteSheet: async (sheetId: string): Promise<void> => {
+        await apiClient.delete(`/sheets/${sheetId}`);
+    },
+
+    /**
+     * Rename sheet
+     */
+    renameSheet: async (sheetId: string, newName: string): Promise<Sheet> => {
+        const response = await apiClient.put<Sheet>(`/sheets/${sheetId}/rename`, {
+            newName
+        });
+        return response.data;
+    },
+
+    /**
      * Health check
      */
     healthCheck: async (): Promise<{ status: string; service: string }> => {
-        const response = await apiClient.get('/health');
+        const response = await apiClient.get('/health', { timeout: 5000 });
         return response.data;
     },
 };

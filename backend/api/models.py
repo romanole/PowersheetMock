@@ -29,6 +29,8 @@ class UploadResponse(BaseModel):
     rows: int
     columns: int
     sizeMb: float
+    sheetId: str
+    sheetName: str
 
 
 class CellUpdateRequest(BaseModel):
@@ -37,6 +39,7 @@ class CellUpdateRequest(BaseModel):
     rowId: int
     column: str
     value: Any
+    formula: Optional[str] = None
 
 
 class ColumnTypeRequest(BaseModel):
@@ -58,3 +61,24 @@ class SuccessResponse(BaseModel):
     """Generic success response"""
     success: bool
     message: Optional[str] = None
+
+
+class CreateSheetRequest(BaseModel):
+    """Request model for creating a new sheet"""
+    name: str
+    columns: Optional[int] = 20
+    rows: Optional[int] = 1000
+
+
+class RenameSheetRequest(BaseModel):
+    """Request model for renaming a sheet"""
+    newName: str
+
+
+class SheetResponse(BaseModel):
+    """Response model for sheet information"""
+    id: str
+    name: str
+    tableName: str
+    rowCount: int
+    columnCount: int

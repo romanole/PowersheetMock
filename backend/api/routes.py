@@ -27,13 +27,29 @@ async def upload_file(file: UploadFile = File(...)):
         
         # Import to DuckDB
         db = get_db()
-        schema = db.import_csv(str(file_path))
+        
+        # Generate unique sheet ID and table name
+        import uuid
+        sheet_id = str(uuid.uuid4())[:8]
+        table_name = f"sheet_{sheet_id}"
+        sheet_name = file.filename.rsplit('.', 1)[0][:30]  # Use filename as sheet name, max 30 chars
+        
+        # Import into new table
+        schema = db.import_csv(str(file_path), table_name=table_name)
+        
+        # Register in sheet_metadata
+        db.conn.execute(f"""
+            INSERT INTO sheet_metadata (sheet_id, sheet_name, table_name, row_count, column_count)
+            VALUES ('{sheet_id}', '{sheet_name}', '{table_name}', {schema["rowCount"]}, {len(schema["columns"])})
+        """)
         
         return UploadResponse(
             tableName=schema["tableName"],
             rows=schema["rowCount"],
             columns=len(schema["columns"]),
-            sizeMb=round(size_mb, 2)
+            sizeMb=round(size_mb, 2),
+            sheetId=sheet_id,
+            sheetName=sheet_name
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -82,9 +98,20 @@ async def update_cell(request: CellUpdateRequest):
     """Update single cell value"""
     try:
         db = get_db()
-        db.update_cell(request.table, request.rowId, request.column, request.value)
+        db.update_cell(request.table, request.rowId, request.column, request.value, request.formula)
         
         return SuccessResponse(success=True, message="Cell updated")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/formulas")
+async def get_formulas(table: str):
+    """Get all formulas for a table"""
+    try:
+        db = get_db()
+        formulas = db.get_formulas(table)
+        return formulas
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -153,6 +180,54 @@ async def change_column_type(request: ColumnTypeRequest):
         )
         
         return SuccessResponse(success=True, message="Column type changed")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/sheets", response_model=List[SheetResponse])
+async def list_sheets():
+    """List all available sheets"""
+    try:
+        db = get_db()
+        sheets = db.list_sheets()
+        return sheets
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/sheets/create", response_model=SheetResponse)
+async def create_sheet(request: CreateSheetRequest):
+    """Create a new sheet"""
+    try:
+        db = get_db()
+        sheet = db.create_sheet(request.name, request.columns, request.rows)
+        return sheet
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/sheets/{sheet_id}", response_model=SuccessResponse)
+async def delete_sheet(sheet_id: str):
+    """Delete a sheet"""
+    try:
+        db = get_db()
+        db.delete_sheet(sheet_id)
+        return SuccessResponse(success=True, message="Sheet deleted")
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/sheets/{sheet_id}/rename", response_model=SheetResponse)
+async def rename_sheet(sheet_id: str, request: RenameSheetRequest):
+    """Rename a sheet"""
+    try:
+        db = get_db()
+        sheet = db.rename_sheet(sheet_id, request.newName)
+        return sheet
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
